@@ -18,6 +18,7 @@ RUN mkdir /tmp/zig-cache
 RUN --mount=type=bind,source=.,target=/app zig build --cache-dir /tmp/zig/cache -p /usr/local -Doptimize=ReleaseFast install
 
 FROM alpine:latest
-RUN apk update && apk add --no-cache ffmpeg-libs tesseract-ocr
+RUN apk add --no-cache ffmpeg-libs tesseract-ocr tesseract-ocr-data-eng
 COPY --from=build /usr/local/bin/dvdsub-tool /usr/local/bin/
+WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/dvdsub-tool"]
