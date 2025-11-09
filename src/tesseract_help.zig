@@ -91,9 +91,11 @@ pub fn recognizeGray8(
 
     // Get recognized text as C string
     const c_text = c.TessBaseAPIGetUTF8Text(tess_api);
+
     if (c_text == null) {
         return TesseractError.RecognitionFailed;
     }
+    defer c.TessDeleteText(c_text);
     var text_buf = &my_ctx.ocr_result_buffer;
     text_buf.clearRetainingCapacity();
     const alloc = my_ctx.alloc;

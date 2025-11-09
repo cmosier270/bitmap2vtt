@@ -41,13 +41,18 @@ fn parseArgs(args: []const [:0]u8) !Args {
 pub const SubtitleContext = struct {
     alloc: std.mem.Allocator,
     tess_handle: tesseract.Handle, // we own this
-    ocr_debug: std.fs.File.Writer, // we own this
+    // ocr_debug: std.fs.File.Writer, // we own this
     ocr_result_buffer: std.ArrayList(u8), // we own this
+    base_file_path: []const u8,
+    // map subtitle stream offset from avformat to
+    // internal list for other records (caching filenames, etc)
+    stream_map: []const ?usize,
 
-    fn deinit(self: *SubtitleContext) void {
-        self.ocr_debug.end() catch {};
+    fn deinit(self: *SubtitleContext, alloc: std.mem.Allocator) void {
+        // self.ocr_debug.end() catch {};
         tesseract.deinit(&self.tess_handle);
         self.ocr_result_buffer.deinit(self.alloc);
+        alloc.free(self.stream_map);
     }
 };
 
@@ -55,7 +60,7 @@ pub const SubtitleError = tesseract.TesseractError || error{
     OutOfMemory,
 };
 
-fn subtitle_handler(my_ctx: *SubtitleContext, subtitle: *c.AVSubtitle, frame_pts: i64) SubtitleError!void {
+fn subtitle_ocr_handler(my_ctx: *SubtitleContext, subtitle: *c.AVSubtitle, frame_pts: i64) SubtitleError!void {
     var alloc = my_ctx.alloc;
     const start_display_time: u32 = subtitle.start_display_time;
     const end_display_time: u32 = subtitle.end_display_time;
@@ -90,15 +95,17 @@ fn subtitle_handler(my_ctx: *SubtitleContext, subtitle: *c.AVSubtitle, frame_pts
         const pts: u32 = @intCast(frame_pts);
         const pts_start = pts + start_display_time;
         const pts_end = pts + end_display_time;
-        var w = &my_ctx.ocr_debug;
+        // var w = &my_ctx.ocr_debug;
         const ocr_text = my_ctx.ocr_result_buffer.items;
 
         to_vtt_time(pts_start, &timebuf1);
         to_vtt_time(pts_end, &timebuf2);
 
-        w.interface.print("{s} --> {s}\n", .{ timebuf1, timebuf2 }) catch {};
-        w.interface.writeAll(ocr_text) catch {};
-        w.interface.writeAll("\n\n") catch {};
+        _ = ocr_text;
+
+        // w.interface.print("{s} --> {s}\n", .{ timebuf1, timebuf2 }) catch {};
+        // w.interface.writeAll(ocr_text) catch {};
+        // w.interface.writeAll("\n\n") catch {};
 
         //todo:  we have hardcoded to palette space at offset 2,
         // this was learned visually.  We need to
@@ -107,6 +114,12 @@ fn subtitle_handler(my_ctx: *SubtitleContext, subtitle: *c.AVSubtitle, frame_pts
         // we can just use a human to figure out the right palette channel.
 
     }
+}
+
+fn subtitle_bitmap_handler(my_ctx: *SubtitleContext, subtitle: *c.AVSubtitle, frame_pts: i64) SubtitleError!void {
+    _ = my_ctx;
+    _ = subtitle;
+    _ = frame_pts;
 }
 
 const MS_PER_HOUR: u32 = 3_600_000;
@@ -177,6 +190,12 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
+    //
+    // TODO:  get the base path of the input file (without extension)
+    //
+    const base_path_idx = std.mem.lastIndexOfScalar(u8, parsed_input, '.') orelse parsed_input.len;
+    const base_path = parsed_input[0..base_path_idx];
+
     const c_path = try to_c_string(allocator, parsed_input);
     defer allocator.free(c_path);
 
@@ -195,7 +214,7 @@ pub fn main() !void {
 
     defer {
         for (list.items) |*codec| {
-            codec.deinit();
+            codec.deinit(allocator);
         }
         list.deinit(allocator);
     }
@@ -206,25 +225,46 @@ pub fn main() !void {
         std.debug.print("  Codec: {s}\n", .{c.avcodec_get_name(codec.codec.*.id)});
     }
 
-    const debug_file = try std.fs.cwd().createFile("test.vtt", .{ .read = false, .truncate = true });
-    defer debug_file.close();
-    var debug_buffer: [4096]u8 = undefined;
+    const stream_map = bm.map_subtitle_streams(list.items, allocator);
 
     var my_ctx = SubtitleContext{
         .alloc = allocator,
         .tess_handle = try tesseract.init(),
-        .ocr_debug = debug_file.writer(&debug_buffer),
         .ocr_result_buffer = std.ArrayList(u8).empty,
+        .base_file_path = base_path,
+        .stream_map = stream_map,
     };
-    defer my_ctx.deinit();
+    defer my_ctx.deinit(allocator);
 
     // Write WebVTT header to the debug file
-    try my_ctx.ocr_debug.interface.writeAll("WEBVTT\n\n");
+    // try my_ctx.ocr_debug.interface.writeAll("WEBVTT\n\n");
 
-    try bm.iterate_frames(&my_ctx, fctx.?, list, subtitle_handler);
+    try bm.iterate_frames(&my_ctx, fctx.?, list, subtitle_bitmap_handler);
 
     //TODO:  Enhance the program to allow a user to visually see some PPM samples of some
     // subtitles.  Ideally, see one PPM for each palette entry held black and the others white.  Then,
     // they could just visually choose one - this assumes that each subtitle is encoded consistently,
     // which may be resonable.
 }
+
+const MyFileWriter = struct {
+    iobuffer: [4096]u8,
+    file_handle: std.fs.File,
+    writer: std.fs.File.Writer,
+
+    pub fn init(file_path: []const u8) !MyFileWriter {
+        const fh = try std.fs.createFileAbsolute(file_path);
+        return .{
+            .iobuffer = undefined,
+            .file_handle = fh,
+            .writer = fh.writer,
+        };
+    }
+
+    pub fn deinit(self: *MyFileWriter) void {
+        self.writer.end() catch |err| {
+            std.log.err("failed to flush MyFileWriter: {s}", .{err});
+        };
+        self.file_handle.close();
+    }
+};

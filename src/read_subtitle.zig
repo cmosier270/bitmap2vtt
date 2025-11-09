@@ -8,6 +8,8 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const mn = @import("main.zig");
 const SubtitleError = mn.SubtitleError;
+const avf_disposition = @import("avf_disposition.zig");
+const avf_metadata = @import("avf_metadata.zig");
 
 /// Represents a single subtitle stream's decoder configuration.
 ///
@@ -26,15 +28,26 @@ const StreamCodec = struct {
     /// Must be freed with avcodec_free_context() via deinit().
     context: ?*c.AVCodecContext,
 
-    /// Releases the allocated codec context.
+    /// Disposition flags indicating the intended use of this stream.
+    /// Contains information about whether the stream is default, forced,
+    /// for hearing impaired audiences, captions, etc.
+    disposition: avf_disposition.Disposition,
+
+    /// Metadata key-value pairs from the stream (e.g., language, title).
+    /// String slices reference FFmpeg's internal memory and remain valid
+    /// for the lifetime of the parent AVFormatContext.
+    metadata: avf_metadata.Metadata,
+
+    /// Releases the allocated codec context and metadata.
     ///
     /// This should be called when the StreamCodec is no longer needed to prevent
     /// memory leaks. Safe to call multiple times (context is set to null after free).
-    pub fn deinit(self: *StreamCodec) void {
+    pub fn deinit(self: *StreamCodec, alloc: std.mem.Allocator) void {
         if (self.context != null) {
             c.avcodec_free_context(&self.context);
             self.context = null;
         }
+        self.metadata.deinit(alloc);
     }
 };
 
@@ -109,14 +122,27 @@ pub fn buildStreamCodecs(allocator: std.mem.Allocator, fctx: *c.AVFormatContext)
                 continue;
             }
 
+            // Capture stream disposition flags
+            const stream_disp = avf_disposition.Disposition.fromInt(stream.*.disposition);
+
+            // Extract stream metadata (language, title, etc.)
+            const stream_meta = avf_metadata.Metadata.fromAVDictionary(allocator, stream.*.metadata) catch |err| blk: {
+                std.log.warn("Failed to extract metadata for stream {d}: {}", .{ i, err });
+                break :blk avf_metadata.Metadata.empty;
+            };
+
             // Add successfully initialized codec to the list
             codecs.append(allocator, .{
                 .stream_index = i,
                 .codec = codec,
                 .context = context,
+                .disposition = stream_disp,
+                .metadata = stream_meta,
             }) catch |err| {
                 std.log.err("Failed to append StreamCodec: {}", .{err});
                 c.avcodec_free_context(&context);
+                var meta_cleanup = stream_meta;
+                meta_cleanup.deinit(allocator);
                 continue;
             };
         }
@@ -206,4 +232,25 @@ pub fn colorAt(
     const p: u8 = idx[y * stride + x];
     const argb: u32 = pal[p];
     return unpackARGB(argb);
+}
+
+pub fn map_subtitle_streams(list: []const StreamCodec, alloc: std.mem.Allocator) []const ?usize {
+    if (list.len == 0) return &[_]?usize{};
+
+    var max_stream_index = list[0].stream_index;
+    for (list[1..]) |codec| {
+        if (codec.stream_index > max_stream_index) {
+            max_stream_index = codec.stream_index;
+        }
+    }
+
+    const map_len = max_stream_index + 1;
+    const map = alloc.alloc(?usize, map_len) catch return &[_]?usize{};
+    @memset(map, null);
+
+    for (list, 0..) |codec, ordinal| {
+        map[codec.stream_index] = ordinal;
+    }
+
+    return map;
 }
