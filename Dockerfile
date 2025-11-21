@@ -13,12 +13,15 @@ RUN tar xf /tmp/zig-x86_64-linux-${ZIG_VERSION}.tar.xz && \
     ln -s ./zig-x86_64-linux-${ZIG_VERSION} ./zig && \
     ln -s /usr/local/zig/zig bin/zig
 
-WORKDIR /app
-RUN mkdir /tmp/zig-cache
-RUN --mount=type=bind,source=.,target=/app zig build --cache-dir /tmp/zig/cache -p /usr/local -Doptimize=ReleaseFast install
-
-FROM alpine:latest
-RUN apk add --no-cache ffmpeg-libs tesseract-ocr tesseract-ocr-data-eng
-COPY --from=build /usr/local/bin/dvdsub-tool /usr/local/bin/
 WORKDIR /work
-ENTRYPOINT ["/usr/local/bin/dvdsub-tool"]
+RUN apk add tesseract-ocr-data-eng
+
+# WORKDIR /app
+# RUN mkdir /tmp/zig-cache
+# RUN --mount=type=bind,source=.,target=/app zig build --cache-dir /tmp/zig/cache -p /usr/local -Doptimize=ReleaseFast install
+
+# FROM alpine:latest
+# RUN apk add --no-cache ffmpeg-libs tesseract-ocr tesseract-ocr-data-eng
+# COPY --from=build /usr/local/bin/dvdsub-tool /usr/local/bin/
+# WORKDIR /work
+# ENTRYPOINT ["/usr/local/bin/dvdsub-tool"]

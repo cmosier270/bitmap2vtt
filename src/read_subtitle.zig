@@ -16,7 +16,7 @@ const avf_metadata = @import("avf_metadata.zig");
 /// Each StreamCodec encapsulates the FFmpeg codec and context needed to decode
 /// subtitles from a specific stream within a media container. The context must
 /// be freed using `deinit()` to avoid memory leaks.
-const StreamCodec = struct {
+pub const StreamCodec = struct {
     /// Zero-based index of this subtitle stream within the parent AVFormatContext.
     stream_index: usize,
 
@@ -154,18 +154,18 @@ pub fn buildStreamCodecs(allocator: std.mem.Allocator, fctx: *c.AVFormatContext)
 pub fn iterate_frames(my_ctx: *mn.SubtitleContext, fctx: *c.AVFormatContext, codecs: std.ArrayList(StreamCodec), comptime processor: anytype) !void {
     const total_streams = fctx.*.nb_streams;
 
-    // Build a list of optional AVCodecContext pointers for all subtitle codecs
+    // Build a list of optional StreamCodec pointers for all subtitle codecs
     var alloc = my_ctx.alloc;
-    var codecs_list = try alloc.alloc(?*c.AVCodecContext, total_streams);
+    var codecs_list = try alloc.alloc(?*StreamCodec, total_streams);
     defer alloc.free(codecs_list);
 
     // Initialize codecs_list: set each entry to null
     for (codecs_list) |*entry| {
         entry.* = null;
     }
-    // For each StreamCodec, set the corresponding entry in codecs_list to its context
+    // For each StreamCodec, set the corresponding entry in codecs_list to its pointer
     for (codecs.items) |*codec| {
-        codecs_list[codec.stream_index] = codec.context;
+        codecs_list[codec.stream_index] = codec;
     }
 
     // Iterate all AVFrames in fctx
@@ -175,7 +175,7 @@ pub fn iterate_frames(my_ctx: *mn.SubtitleContext, fctx: *c.AVFormatContext, cod
 
         // Check if this packet belongs to a subtitle stream we care about
         const stream_index: usize = @intCast(pkt.stream_index);
-        const codec = codecs_list[stream_index] orelse {
+        const stream_codec = codecs_list[stream_index] orelse {
             continue;
         };
         var subtitle: c.AVSubtitle = undefined;
@@ -183,7 +183,7 @@ pub fn iterate_frames(my_ctx: *mn.SubtitleContext, fctx: *c.AVFormatContext, cod
 
         // Decode the subtitle packet
         const ret = c.avcodec_decode_subtitle2(
-            codec,
+            stream_codec.context,
             &subtitle,
             &got_subtitle,
             &pkt,
@@ -195,7 +195,7 @@ pub fn iterate_frames(my_ctx: *mn.SubtitleContext, fctx: *c.AVFormatContext, cod
             std.log.err("Failed to decode subtitle packet for stream {d}", .{stream_index});
         } else if (got_subtitle != 0) {
             // Successfully decoded a subtitle
-            try processor(my_ctx, &subtitle, pkt.pts);
+            try processor(my_ctx, &subtitle, pkt.pts, stream_codec);
         }
     }
 }
